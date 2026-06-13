@@ -1,198 +1,332 @@
-# Pi API Reference
+# Pi API Reference for MediaPi Adult
 
 **Official Documentation**: https://pi.dev/docs/latest/extensions
 
-**Local Copy**: [PI_EXTENSIONS.md](PI_EXTENSIONS.md) (full official documentation)
+**Local Copy**: [PI_EXTENSIONS.md](PI_EXTENSIONS.md)
 
----
+This document narrows the Pi extension API down to the patterns MediaPi Adult should use.
 
-## Quick Reference
+## APIs Used
 
-### APIs Used in MediaPi
+| API | Purpose |
+| --- | --- |
+| `pi.registerTool()` | Register `adult_*` tools. |
+| `pi.appendEntry()` | Persist conversational workflow events, search snapshots, import/cleanup summaries, and tool idempotency markers. |
+| `ctx.sessionManager.getEntries()` | Reconstruct session-local state and check same-session idempotency. |
+| `pi.on("session_start")` | Rebuild in-memory caches and start one background monitor interval. |
+| `pi.on("session_shutdown")` | Stop monitor timers before reload, quit, new session, or resume. |
+| `ctx.ui.confirm()` / `ctx.ui.input()` | Confirm direct magnets as adult content and collect missing code/no-code information when UI is available. |
+| `ctx.ui.notify()` / `ctx.ui.setStatus()` | Notify import failures, conflicts, cleanup failures, and monitor status. |
+| `pi.exec()` | Optional shell bridge for clients that cannot use direct HTTP APIs. Prefer native `fetch` for downloader HTTP APIs. |
 
-| API | Purpose | Official Doc Section |
-|-----|---------|---------------------|
-| `pi.registerTool()` | Register custom tools (viewing_*, adult_*) | ExtensionAPI Methods > pi.registerTool |
-| `pi.appendEntry()` | Persist download monitors, import artifacts | ExtensionAPI Methods > pi.appendEntry |
-| `ctx.sessionManager.getEntries()` | Restore state from session | ExtensionContext > ctx.sessionManager |
-| `pi.on("session_start")` | Rebuild in-memory cache on startup | Events > Session Events |
-| `pi.on("tool_call")` | Idempotency key checks | Events > Tool Events |
-| `pi.exec()` | Call external services (Prowlarr, qBittorrent) | ExtensionAPI Methods > pi.exec |
-
----
-
-## Core Patterns
-
-### 1. Tool Registration
+## Tool Registration Pattern
 
 ```typescript
-import { Type } from "typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "../src/utils/schema";
 
-pi.registerTool({
-  name: "viewing_search_media",
-  label: "Search Media",
-  description: "Search movies/series via Prowlarr + TMDB",
-  parameters: Type.Object({
-    query: Type.String(),
-    media_type: Type.Union([Type.Literal("movie"), Type.Literal("series")]),
-  }),
-  async execute(toolCallId, params, signal, onUpdate, ctx) {
-    return {
-      content: [{ type: "text", text: "Found 5 results" }],
-      details: { results: [...] },
-    };
+export function registerAdultSearchTool(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "adult_search",
+    label: "Adult Search",
+    description: "Search public adult BT resources and JAV metadata by code or query",
+    parameters: Type.Object({
+      query: Type.String({ minLength: 1 }),
+      sites: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, signal, onUpdate, _ctx) {
+      onUpdate?.({
+        content: [{ type: "text", text: "Searching enabled public adult BT sites..." }],
+      });
+
+      const result = await searchAdultResources(params, { signal });
+
+      return {
+        content: [{ type: "text", text: formatAdultSearchCard(result) }],
+        details: result,
+      };
+    },
+  });
+}
+```
+
+Key requirements:
+
+- Tool parameter schemas are JSON-schema-compatible objects. The current implementation uses a local `Type` helper to avoid runtime npm dependencies inside Pi containers.
+- Tool result text is user-facing and must redact local paths.
+- `details` may contain workflow data, but must not contain credentials or real local paths.
+- Pass `signal` to network requests where possible.
+- Side-effecting tools must check same-session idempotency and long-lived completed history before mutating the downloader.
+
+## Planned Tool Parameters
+
+```typescript
+adult_search({
+  query: string;
+  sites?: string[];
+})
+
+adult_get_resources({
+  result_id?: string;
+  source?: string;
+  magnet?: string;
+})
+
+adult_add_download({
+  magnet: string;
+  idempotency_key: string;
+  code?: string;
+  no_code_confirmed?: boolean;
+  display_title?: string;
+  target_alias?: string;
+  dedupe_override?: boolean;
+})
+
+adult_register_download({
+  downloader_id?: string;
+  infohash?: string;
+  magnet?: string;
+  code?: string;
+  no_code_confirmed?: boolean;
+  display_title?: string;
+  target_alias?: string;
+  dedupe_override?: boolean;
+})
+
+adult_import({
+  task_id: string;
+  target_alias?: string;
+})
+
+adult_cleanup({
+  task_id: string;
+  force?: boolean;
+})
+```
+
+Normal operation is monitor-driven after `adult_add_download` or `adult_register_download`. `adult_import` and `adult_cleanup` remain available for manual retry and recovery.
+
+## Direct Magnet Confirmation
+
+When a user pastes a magnet directly, MediaPi Adult must ask whether it is an adult resource before calling `adult_add_download`.
+
+```typescript
+const isAdult = await ctx.ui.confirm(
+  "Adult download?",
+  "Should this magnet enter the MediaPi Adult workflow?"
+);
+
+if (!isAdult) {
+  return {
+    content: [{ type: "text", text: "This magnet was not added to MediaPi Adult." }],
+    details: { handled: false },
+  };
+}
+```
+
+If `ctx.hasUI` is false, the agent should ask in chat instead of silently adding the magnet.
+
+## Session Persistence
+
+Use `pi.appendEntry(customType, data)` for state that belongs to the current conversation and should survive reloads or retries.
+
+```typescript
+pi.appendEntry("adult_task_event", {
+  task_id: "adult-task-abc123",
+  event: "registered",
+  code: "SSIS-843",
+  target_alias: "censored",
+  downloader: "qbittorrent",
+  downloader_id: "hash123",
+  created_at: Date.now(),
+});
+```
+
+For imports, persist redacted paths only:
+
+```typescript
+pi.appendEntry("adult_import", {
+  import_id: "import-abc123",
+  task_id: "adult-task-abc123",
+  target_alias: "censored",
+  source_path: "[REDACTED]",
+  target_path: "[REDACTED]",
+  strategy: "hardlink",
+  files_imported: 1,
+  imported_at: Date.now(),
+});
+```
+
+## Local State Files
+
+Use `ADULT_STATE_DIR` for cross-session task and history state.
+
+Recommended files:
+
+```text
+ADULT_STATE_DIR/
+  tasks.jsonl
+  completed.jsonl
+```
+
+Active task state should include enough information for monitor recovery:
+
+```typescript
+{
+  task_id: "adult-task-abc123",
+  status: "downloading",
+  downloader: "qbittorrent",
+  downloader_id: "hash123",
+  infohash: "abc...def",
+  code: "SSIS-843",
+  code_status: "coded",
+  display_title: "SSIS-843 ...",
+  target_alias: "censored",
+  dedupe_override: false,
+  created_at: 1781280000000,
+  updated_at: 1781280000000
+}
+```
+
+Completed history should be long-lived and dedupe-oriented:
+
+```typescript
+{
+  key_type: "code",
+  key: "SSIS-843",
+  code: "SSIS-843",
+  code_status: "coded",
+  infohash: "abc...def",
+  display_title: "SSIS-843 ...",
+  target_alias: "censored",
+  import_id: "import-abc123",
+  completed_at: 1781280000000
+}
+```
+
+For user-confirmed no-code content, use infohash as the key and store a display title:
+
+```typescript
+{
+  key_type: "infohash",
+  key: "abc...def",
+  code_status: "no_code_confirmed",
+  display_title: "User confirmed title",
+  target_alias: "no_code",
+  import_id: "import-def456",
+  completed_at: 1781280000000
+}
+```
+
+Do not store real source paths, real target paths, or downloader credentials in local state.
+
+## Idempotency and Dedupe Pattern
+
+Side-effecting tools must check two things before calling external services:
+
+1. Same-session idempotency for repeated tool calls.
+2. Long-lived completed history for duplicate adult content.
+
+```typescript
+function findPriorEntry(ctx, customType: string, idempotencyKey: string) {
+  return ctx.sessionManager.getEntries().find((entry) => {
+    return (
+      entry.type === "custom" &&
+      entry.customType === customType &&
+      entry.data?.idempotency_key === idempotencyKey
+    );
+  });
+}
+```
+
+Completed-history dedupe is blocking by default. A user can explicitly override it for one task, and that override must be recorded in active task state.
+
+## Monitor Pattern
+
+The extension may use Node timers for in-process monitoring.
+
+```typescript
+let monitorTimer: NodeJS.Timeout | undefined;
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async (_event, ctx) => {
+    if (!monitorTimer && runtime.config.monitorEnabled) {
+      monitorTimer = setInterval(() => {
+        runtime.monitor.tick().catch((error) => {
+          ctx.ui.notify(`Adult monitor error: ${redactError(error)}`, "error");
+        });
+      }, runtime.config.monitorIntervalMs);
+    }
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (monitorTimer) clearInterval(monitorTimer);
+    monitorTimer = undefined;
+  });
+}
+```
+
+Implementation requirements:
+
+- Start at most one interval per extension runtime.
+- Process only tasks recorded in local active task state.
+- Do not mutate arbitrary downloader tasks.
+- Make state transitions idempotent and retryable.
+- Notify the user on `import_failed`, `import_conflict`, and `cleanup_failed` when UI is available.
+
+## External Calls
+
+Prefer direct HTTP calls with `fetch` for site adapters and downloader APIs:
+
+```typescript
+const response = await fetch(url, {
+  signal,
+  headers: {
+    "User-Agent": "MediaPi-Adult/0.1",
   },
 });
 ```
 
-**Key Points**:
-- Use `typebox` for parameter schemas
-- `execute()` returns `{ content, details }`
-- `signal` for cancellation support
-- `onUpdate()` for streaming progress
+Requirements:
 
-### 2. State Persistence (D033: Pi Session State)
+- Use timeouts for external sites and downloader APIs.
+- Never log passwords or full environment-derived URLs containing credentials.
+- Return partial search results when one public BT or metadata adapter fails.
+- Throw tool errors only after redacting sensitive details.
 
-```typescript
-// Persist download monitor
-pi.appendEntry("viewing_download", {
-  idempotency_key: "pi-20260608-abc123",
-  download_id: "hash123",
-  infohash: "abc...def",
-  status: "active",
-  retention_until: Date.now() + 7 * 24 * 3600 * 1000,
-});
+## User-Facing Formatting
 
-// Restore on session start
-pi.on("session_start", async (_event, ctx) => {
-  const entries = ctx.sessionManager.getEntries();
-  const downloads = entries.filter(
-    e => e.type === "custom" && e.customType === "viewing_download"
-  );
-  
-  for (const dl of downloads) {
-    activeDownloads.set(dl.data.download_id, dl.data);
-  }
-});
+Search cards should be compact and actionable:
+
+```text
+[SSIS-843] Japanese or translated title
+Maker: S1 NO.1 STYLE
+Date: 2023-08-18 | Duration: 175 min
+Actors: ...
+
+Resources:
+1. sukebei | 8.9 GB | seeders: 7
+   magnet:?xt=urn:btih:...
 ```
 
-**Key Points**:
-- Sessions persist to `.pi/sessions/*.jsonl`
-- Use `customType` to namespace entries
-- Rebuild in-memory state in `session_start`
+Avoid local paths in all import and cleanup output:
 
-### 3. Idempotency (D021: Tools Must Be Idempotent)
-
-```typescript
-async function executeIdempotent<T>(
-  ctx: ExtensionContext,
-  idempotencyKey: string,
-  customType: string,
-  executor: () => Promise<T>
-): Promise<T> {
-  // Check session for prior execution
-  const entries = ctx.sessionManager.getEntries();
-  const existing = entries.find(
-    e => e.type === "custom" &&
-    e.customType === customType && 
-    e.data?.idempotency_key === idempotencyKey
-  );
-  
-  if (existing) return existing.data.result;
-  
-  // Execute and persist
-  const result = await executor();
-  pi.appendEntry(customType, {
-    idempotency_key: idempotencyKey,
-    result,
-    executed_at: Date.now(),
-  });
-  
-  return result;
-}
+```text
+Import complete
+Target: censored
+Strategy: hardlink
+Path: [hidden]
 ```
-
-**Key Points**:
-- Check `idempotency_key` before side effects
-- Store result in session entry
-- Retry returns cached result
-
-### 4. External Service Calls
-
-```typescript
-// Execute shell command
-const result = await pi.exec("curl", [
-  "-X", "POST",
-  `${PROWLARR_URL}/api/v1/search`,
-  "-H", `X-Api-Key: ${PROWLARR_API_KEY}`,
-  "-d", JSON.stringify({ query: "Inception" }),
-], { signal });
-
-// result: { stdout, stderr, code, killed }
-```
-
-**Key Points**:
-- Pass `signal` from tool context
-- Handle `code !== 0` as error
-- Parse `stdout` for JSON responses
-
----
-
-## Example Correspondence
-
-| MediaPi Feature | Official Example |
-|----------------|------------------|
-| Viewing extension (9 tools) | `examples/extensions/todo.ts` (stateful tools) |
-| Adult extension (npm deps) | `examples/extensions/with-deps/` (package structure) |
-| BT site adapters | Custom module pattern (no direct example) |
-| Resource handles (encryption) | Custom implementation |
-
----
-
-## Session Lifecycle
-
-```
-pi starts
-  ├─► session_start { reason: "startup" }
-  └─► resources_discover { reason: "startup" }
-
-user: "下载电影 Inception 2010"
-  ├─► input (can intercept)
-  ├─► before_agent_start (can inject context)
-  ├─► agent_start
-  ├─► turn_start
-  │   ├─► tool_call (check idempotency_key)
-  │   ├─► tool_execution_start
-  │   ├─► tool_result
-  │   └─► tool_execution_end
-  ├─► turn_end
-  └─► agent_end
-
-/new or /resume
-  ├─► session_shutdown
-  └─► session_start { reason: "new" | "resume" }
-
-exit
-  └─► session_shutdown
-```
-
----
 
 ## Verification Checklist
 
-Before implementing:
-
-- [ ] Read [PI_EXTENSIONS.md](PI_EXTENSIONS.md) fully
-- [ ] Review `examples/extensions/todo.ts` (state management)
-- [ ] Review `examples/extensions/with-deps/` (npm dependencies)
-- [ ] Understand session persistence (`.pi/sessions/*.jsonl`)
-- [ ] Test minimal extension with `pi -e ./test.ts`
-
----
-
-## References
-
-- **Full Official Docs**: [PI_EXTENSIONS.md](PI_EXTENSIONS.md)
-- **Online**: https://pi.dev/docs/latest/extensions
-- **TypeBox**: https://github.com/sinclairzx81/typebox
-- **Pi TUI Components**: https://pi.dev/docs/latest/tui-components
+- [ ] Read [PI_EXTENSIONS.md](PI_EXTENSIONS.md).
+- [ ] Register all planned tools from `src/index.ts`.
+- [ ] Validate TypeBox schemas against TypeScript types.
+- [ ] Test direct magnet adult confirmation before add-download.
+- [ ] Test completed-history dedupe before external downloader calls.
+- [ ] Test same-session idempotency before repeated side effects.
+- [ ] Test monitor start/stop does not create duplicate intervals.
+- [ ] Test import target alias routing and redaction.
+- [ ] Test path redaction in `content`, `details`, Pi session entries, and local state.
+- [ ] Test partial adapter failure behavior.

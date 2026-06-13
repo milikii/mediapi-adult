@@ -1,461 +1,266 @@
-# MediaPi Adult - BT 成人链扩展
+# MediaPi Adult
 
-**Pi 扩展 for BT 成人内容自动化工作流**
+Pi TypeScript extension for an adult public-BT workflow:
 
-通过 Telegram/微信/飞书聊天完成：搜索番号 → 查看元数据卡片 → 下载 → 导入 → 清理
+`search/adopt/confirm magnet -> register adult task -> monitor downloader -> auto-import -> cleanup downloader -> record completed history`
 
----
+The extension is intended to be the always-available adult BT task intake and automation layer for Pi. It is not a standalone app, web UI, media player, or PT/Prowlarr workflow.
 
-## 项目定位
+## Current Status
 
-**MediaPi Adult 是一个独立的 Pi TypeScript 扩展**，专注于 BT 成人链工作流。
+Implemented in the current codebase:
 
-- **不是**：独立应用、Web UI、通用机器人
-- **是**：Pi 扩展，通过聊天接口操作成人内容自动化
+- Pi extension entrypoint in `src/index.ts`
+- Shared domain types in `src/types.ts`
+- Base BT site adapter interface in `src/clients/bt-sites/base.ts`
+- Base JAV metadata adapter interface in `src/clients/metadata/base.ts`
+- Runtime wiring in `src/runtime.ts`
+- `adult_search`
+- `adult_get_resources`
+- `adult_add_download`
+- `adult_import`
+- `adult_cleanup`
+- Sukebei BT search adapter
+- JavBus metadata adapter
+- qBittorrent and Transmission downloader clients
+- Import service with hardlink-first/copy fallback and path redaction
+- Unit tests for parser, import redaction/root validation, idempotency, and retention checks
+- Environment template in `.env.example`
 
-**观影链扩展** → 独立仓库：[mediapi-viewing](https://github.com/milikii/mediapi-viewing)
+Product requirements now call for changes that are not fully implemented yet:
 
----
+- Direct magnet adult confirmation before entering this workflow.
+- Adoption of existing adult downloader tasks.
+- Dedicated active-task registry in local state.
+- Cross-session completed-history dedupe by normalized code or confirmed no-code infohash.
+- In-process background monitor.
+- Category alias import routing: `censored`, `uncensored`, `no_code`.
+- Automatic cleanup after successful import and completed-history write.
+- Removal of the old default 3-day retention/seeding model.
 
-## 功能概览
+Known gaps:
 
-### 5 个核心工具
+- Parser robustness still depends on real Sukebei/JavBus HTML validation.
+- Translation service is a pass-through placeholder.
+- JavBus magnet, Tokyo Toshokan, and JavLibrary fallback adapters are not implemented.
+- No Pi TUI custom rendering beyond plain text tool output.
+- No real qBittorrent/Transmission integration test has been run in this workspace.
+- The implementation still needs to be aligned with the updated PRD.
 
-```
-搜索阶段：
-1. adult_search           → BT 站点搜索 + 丰富元数据卡片
-2. adult_get_resources    → 获取资源详情
+## Product Scope
 
-下载阶段：
-3. adult_add_download     → 添加下载（3天保种）
+MediaPi Adult is:
 
-导入阶段：
-4. adult_import           → 隔离目录导入（保留原名）
+- A Pi extension loaded by Pi.
+- A chat-operated adult public-BT task intake and automation workflow.
+- Separate from `mediapi-viewing`, which handles PT/movie/series viewing workflows.
+- Built around a dedicated adult downloader instance.
 
-清理阶段：
-5. adult_cleanup          → 快速清理
-```
+MediaPi Adult is not:
 
-### 可插拔 BT 适配器
+- A web UI.
+- A general-purpose bot framework.
+- A media player or library manager.
+- A Prowlarr or PT-indexer client.
+- A shared runtime dependency of `mediapi-viewing`.
 
-```
-Phase 1 (MVP):    Sukebei
-Phase 2:          JavBus + Tokyo Toshokan
-Phase 3+:         社区贡献
-```
+See [Product Requirements](docs/PRD.md) for the complete product contract.
 
----
+## Target Workflow
 
-## 使用示例
+Phase 1 should support three adult task entrances:
 
-### 通过微信搜索番号
+1. Search a code or query with `adult_search`, then choose a public-BT result.
+2. Paste a magnet, confirm it is adult content, then add it to the adult workflow.
+3. Register/adopt an existing task from the dedicated adult downloader.
 
-```
-用户: 搜索 SSIS-843
+After a task is registered:
 
-Pi: 🎬 [SSIS-843] 比AI更瑟情的肉体 懦弱顺从的女学生被中年大叔们驯养的萝莉巨乳麻子酱 宇野美玲
-    
-    SSIS-843 AIよりシコい女体 気が弱い言いなり女学生は中年オヤジ達に飼われたロリ巨乳マン子ちゃん 宇野みれい
-    
-    [海报图片]
-    
-    ━━━━━━━━━━━━━━━━━━
-    👤 演员： 宇野みれい (宇野美玲)
-    🏢 片商： S1 NO.1 STYLE
-    📅 日期： 2023-08-18  |  ⏳ 时长： 175分钟
-    📦 分类： 有码 (Censored)
-    
-    ━━━━━━━━━━━━━━━━━━
-    💾 资源列表：
-    
-    【资源 1】 sukebei | 8.9 GB | 做种: 7
-    🧲 magnet:?xt=urn:btih:e7fdc4d...
-    
-    【资源 2】 sukebei | 7.6 GB | 做种: 1
-    🧲 magnet:?xt=urn:btih:02f353f...
-    
-    ━━━━━━━━━━━━━━━━━━
+1. The extension records it in local active-task state.
+2. The in-process background monitor polls the dedicated adult downloader while Pi is running.
+3. When the task completes, the extension imports files into a configured category alias.
+4. Coded tasks use `<category-root>/<NORMALIZED-CODE>/<original filename>`.
+5. Confirmed no-code tasks use `<no-code-root>/<sanitized-display-title>-<short-infohash>/<original filename>`.
+6. After import and completed-history write succeed, the extension removes the downloader task and temporary downloader data.
+7. Completed history blocks future duplicate downloads by normalized code, or by infohash for confirmed no-code content.
 
-用户: 下载资源 1
+## Tool Contract
 
-Pi: ✅ 下载已添加
-    SSIS-843
-    保种至: 2026-06-12 (3天)
-    状态: 正在连接...
+The planned public tools are:
 
-用户: 查询进度
+| Tool | Purpose | MVP status |
+| --- | --- | --- |
+| `adult_search` | Search public adult BT resources and render metadata card | Implemented, needs validation |
+| `adult_get_resources` | Resolve or re-display resources from a prior search | Implemented |
+| `adult_add_download` | Add a confirmed adult magnet to the dedicated downloader | Implemented, needs completed-history and new metadata fields |
+| `adult_register_download` / `adult_adopt_download` | Register an existing downloader task for monitoring | Planned |
+| `adult_import` | Import completed task into category alias with redacted output | Implemented, needs alias routing and task layout |
+| `adult_cleanup` | Retry cleanup for recovery | Implemented as manual retention cleanup, needs new automatic-cleanup semantics |
 
-Pi: 📥 正在下载：
-    SSIS-843
-    ━━━━━━━━━━━━━━━━━ 89%
-    已下载: 7.9 GB / 8.9 GB
+See [Pi API Reference](docs/PI_API_REFERENCE.md) for parameter and persistence patterns.
 
-(下载完成后)
+## Architecture
 
-用户: 导入
+The extension is designed around small modules:
 
-Pi: ✅ 导入成功
-    策略: 硬链接
-    路径: [已隐藏]  ← 强制脱敏
-
-(3天后)
-
-用户: 清理
-
-Pi: ✅ 清理完成
-    释放空间: 8.9 GB
-```
-
----
-
-## 架构设计
-
-### 系统架构
-
-```
-用户 (Telegram/微信/飞书)
-    ↓
-Pi Chat (多渠道桥接) ← Pi 提供
-    ↓
-Pi Agent Runtime (对话、授权、调度)
-    ↓
-MediaPi Adult Extension (5 工具)
-    ↓
-外部服务:
-  - BT 站点 (Sukebei, JavBus 等)
-  - JAV 元数据站 (JavBus, JavLibrary)
-  - 翻译服务 (日文→中文)
-  - qBittorrent/Transmission (下载器)
+```text
+Pi runtime
+  -> src/index.ts registers tools and lifecycle hooks
+  -> tools accept/search/register adult tasks
+  -> public BT adapters fetch magnet results
+  -> metadata adapters fetch JAV details
+  -> dedicated downloader clients call qBittorrent or Transmission
+  -> local task registry and completed history persist cross-session state
+  -> monitor advances completed tasks through import and cleanup
 ```
 
-### 关键特性
+Key architecture docs:
 
-**1. 丰富元数据卡片（D036）**
-- 海报展示
-- 日文标题 + 中文翻译
-- 演员信息（日文 + 中文）
-- 片商、日期、时长
-- 磁力链列表（内联显示）
+- [Architecture](docs/ARCHITECTURE.md)
+- [Architecture Decisions](docs/DECISIONS.md)
+- [Pi Extensions Official Docs Copy](docs/PI_EXTENSIONS.md)
 
-**2. 可插拔 BT 适配器（D032）**
-```typescript
-// 统一接口
-interface BTSiteAdapter {
-  readonly name: string;
-  readonly displayName: string;
-  search(query: string): Promise<SearchResult[]>;
-  healthCheck(): Promise<boolean>;
-}
+## Configuration
 
-// 渐进式扩展
-Phase 1: Sukebei (MVP)
-Phase 2: JavBus, Tokyo Toshokan
-Phase 3+: 社区贡献
-```
-
-**3. 元数据聚合**
-- 并发搜索：BT 站（磁力链）+ JAV 站（元数据）
-- 聚合结果：标题、演员、片商、海报
-- 自动翻译：日文→中文
-
-**4. 强制隐私脱敏**
-```typescript
-// 所有路径信息强制脱敏
-pi.appendEntry("adult_import", {
-  source_path: "[REDACTED]",
-  target_path: "[REDACTED]",
-  // ...
-});
-
-// 用户看到的
-return {
-  content: [{ type: "text", text: "✅ 导入成功\n路径: [已隐藏]" }],
-};
-```
-
-**5. 快速清理**
-- 3 天保种期（固定）
-- 简化安全检查
-- 路径脱敏
-
----
-
-## 安装
-
-### 前置要求
-
-- **Pi CLI** (最新版)
-- **Node.js** 20+
-- **外部服务**:
-  - qBittorrent 或 Transmission
-
-### 安装步骤
-
-1. **克隆仓库**
-   ```bash
-   git clone https://github.com/milikii/mediapi-adult.git
-   cd mediapi-adult
-   ```
-
-2. **安装依赖**
-   ```bash
-   npm install
-   ```
-
-3. **配置环境变量**
-   ```bash
-   cp .env.example .env
-   # 编辑 .env 填入配置
-   ```
-
-4. **编译**
-   ```bash
-   npm run build
-   ```
-
-5. **部署到 Pi**
-   ```bash
-   # 方式 1: 复制到 Pi 扩展目录
-   cp -r dist ~/.pi/agent/extensions/adult
-   
-   # 方式 2: 直接从源码加载（开发模式）
-   pi -e ./src/index.ts
-   ```
-
-6. **验证**
-   ```bash
-   # 在 Pi 中测试
-   pi
-   > adult_search SSIS-843
-   ```
-
----
-
-## 配置
-
-### 环境变量
+Start from the template:
 
 ```bash
-# 下载器配置（二选一）
-ADULT_DOWNLOADER_TYPE=qbittorrent  # 或 transmission
+cp .env.example .env
+```
 
-# qBittorrent
+Important defaults and required values:
+
+```bash
+ADULT_DOWNLOADER_TYPE=qbittorrent
 ADULT_QB_URL=http://localhost:8081
-ADULT_QB_USERNAME=admin
-ADULT_QB_PASSWORD=your_password
-
-# Transmission
 ADULT_TR_URL=http://localhost:9092
-ADULT_TR_USERNAME=transmission
-ADULT_TR_PASSWORD=your_password
-
-# 隔离目录
-ADULT_IMPORT_ROOT=/private/adult
-
-# 保种策略
-ADULT_RETENTION_DAYS=3  # 固定 3 天
-
-# 翻译服务（可选）
-TRANSLATE_API_KEY=your_api_key  # Google Translate 或其他
-```
-
-### BT 适配器配置
-
-```bash
-# 启用的站点（逗号分隔）
-ADULT_ENABLED_SITES=sukebei,javbus
-
-# 站点特定配置
+ADULT_STATE_DIR=/private/adult/.mediapi-adult-state
+ADULT_IMPORT_TARGET_CENSORED=/private/adult/censored
+ADULT_IMPORT_TARGET_UNCENSORED=/private/adult/uncensored
+ADULT_IMPORT_TARGET_NO_CODE=/private/adult/no-code
+ADULT_MONITOR_ENABLED=true
+ADULT_MONITOR_INTERVAL_SECONDS=60
+ADULT_ENABLED_SITES=sukebei
 SUKEBEI_BASE_URL=https://sukebei.nyaa.si
 JAVBUS_BASE_URL=https://www.javbus.com
 ```
 
----
+The adult downloader should be a dedicated qBittorrent or Transmission instance. Do not point it at the PT/viewing downloader.
 
-## 开发
+See [Environment Configuration](docs/ENVIRONMENT.md) for the full table and validation rules.
 
-### 项目结构
+## Development
 
-```
-src/
-├── index.ts              # 扩展入口
-├── tools/                # 5 个工具实现
-│   ├── search.ts         # 搜索 + 元数据卡片
-│   ├── get-resources.ts
-│   ├── add-download.ts
-│   ├── import.ts
-│   └── cleanup.ts
-├── clients/
-│   ├── bt-sites/         # BT 磁力站适配器
-│   │   ├── base.ts       # BTSiteAdapter 接口
-│   │   ├── sukebei.ts
-│   │   ├── javbus-magnet.ts
-│   │   └── tokyotosho.ts
-│   ├── metadata/         # JAV 元数据站适配器
-│   │   ├── base.ts
-│   │   ├── javbus-metadata.ts
-│   │   └── javlibrary-metadata.ts
-│   ├── qbittorrent.ts
-│   ├── transmission.ts
-│   └── downloader-factory.ts
-├── adapters/
-│   ├── magnet-registry.ts    # 磁力站注册表
-│   └── metadata-registry.ts  # 元数据站注册表
-├── services/
-│   └── translator.ts     # 翻译服务（日文→中文）
-└── types.ts
-```
-
-### 开发命令
+Install dependencies:
 
 ```bash
-# 开发模式（watch）
-npm run dev
+npm install
+```
 
-# 编译
+Compile:
+
+```bash
 npm run build
-
-# 测试
-npm test
-
-# Lint
-npm run lint
 ```
 
-### 添加新的 BT 站点适配器
-
-参考 [BT-ADAPTER-GUIDE.md](docs/BT-ADAPTER-GUIDE.md)
+Run in Pi for quick extension loading tests:
 
 ```bash
-# 1. 复制模板
-cp src/clients/bt-sites/TEMPLATE.ts src/clients/bt-sites/mysite.ts
-
-# 2. 实现接口
-# 编辑 mysite.ts 实现 search() 和 healthCheck()
-
-# 3. 注册适配器
-# 编辑 src/index.ts 添加 registry.register(new MySiteAdapter())
-
-# 4. 测试
-npm test -- mysite.test.ts
-
-# 5. 提交 PR
-git add src/clients/bt-sites/mysite.ts
-git commit -m "feat: add MySite adapter"
+pi -e ./src/index.ts
 ```
 
----
+Command-level validation still requires running inside Pi with a configured dedicated downloader and network access to selected public BT/metadata sites.
 
-## 实施计划
+## Planned Source Layout
 
-### Phase 1: MVP（Week 1） ⏸️
+```text
+src/
+  index.ts
+  types.ts
+  tools/
+    search.ts
+    get-resources.ts
+    add-download.ts
+    register-download.ts
+    import.ts
+    cleanup.ts
+  adapters/
+    magnet-registry.ts
+    metadata-registry.ts
+  clients/
+    bt-sites/
+      base.ts
+      sukebei.ts
+    metadata/
+      base.ts
+      javbus-metadata.ts
+    downloader.ts
+    qbittorrent.ts
+    transmission.ts
+    downloader-factory.ts
+  services/
+    completed-history.ts
+    task-registry.ts
+    monitor.ts
+    importer.ts
+    translator.ts
+```
 
-**5 个核心工具 + Sukebei 适配器**：
-- [ ] adult_search（元数据卡片）
-- [ ] adult_get_resources
-- [ ] adult_add_download
-- [ ] adult_import（隔离导入 + 脱敏）
-- [ ] adult_cleanup
-- [ ] Sukebei 适配器
-- [ ] JavBus 元数据适配器
-- [ ] 翻译服务
+## Roadmap
 
-### Phase 2: 多站点扩展（Week 2） ⏸️
+Phase 1: align implementation with updated workflow
 
-**新增适配器**：
-- [ ] JavBus 磁力链适配器
-- [ ] Tokyo Toshokan 适配器
-- [ ] JavLibrary 元数据适配器
-- [ ] 适配器配置工具
+- [x] Implement Sukebei BT search.
+- [x] Implement JavBus metadata lookup.
+- [x] Implement qBittorrent and Transmission clients with a shared minimal interface.
+- [x] Implement initial tool set.
+- [x] Add tests for parsing, idempotency, redaction, and retention checks.
+- [ ] Add direct magnet adult confirmation.
+- [ ] Add local active-task registry and completed-history state.
+- [ ] Add `adult_register_download` / `adult_adopt_download`.
+- [ ] Add background monitor lifecycle.
+- [ ] Add category alias import routing and task directory layout.
+- [ ] Change cleanup semantics from retention-based to post-import automatic cleanup.
+- [ ] Validate against real Pi, external sites, and a configured dedicated downloader.
 
-### Phase 3+: 社区贡献 ⏸️
+Phase 2: multi-site expansion
 
-**社区框架**：
-- [ ] 适配器模板
-- [ ] 测试模板
-- [ ] BT-ADAPTER-GUIDE.md
-- [ ] Contributing 指南
+- Add more public BT adapters.
+- Add JavBus magnet adapter if useful.
+- Add Tokyo Toshokan adapter.
+- Add JavLibrary metadata fallback.
+- Add adapter health/config tooling if operationally useful.
 
----
+Phase 3: contributor framework
 
-## 文档
+- Add BT adapter template.
+- Add adapter test template.
+- Publish contribution guide and issue templates.
 
-- [架构设计](docs/ARCHITECTURE.md) - 即将添加
-- [产品需求](docs/PRD.md) - 即将添加
-- [架构决策](docs/DECISIONS.md) - 即将添加
-- [BT 适配器开发指南](docs/BT-ADAPTER-GUIDE.md) - 即将添加
-- [Pi API 参考](docs/PI_API_REFERENCE.md) - 即将添加
+## Privacy and Safety
 
----
+The intended privacy boundary is strict:
 
-## 相关项目
+- Real source and target file paths must never be written to Pi session entries or long-lived state.
+- Tool result text should show `[REDACTED]` or `[hidden]` for local paths.
+- Target aliases such as `censored`, `uncensored`, and `no_code` may be shown and persisted.
+- Search queries, magnets, infohashes, downloader IDs, and task IDs may appear in session/tool data when needed for workflow continuity.
+- Downloader credentials must never appear in errors, logs, details, or state files.
+- The extension runs locally, but it calls configured external public BT/metadata sites and downloader APIs.
+- No claim is made that Pi session storage, local state, or magnet transport is encrypted by this extension.
 
-- **[mediapi-viewing](https://github.com/milikii/mediapi-viewing)** - PT 观影链扩展（独立仓库）
-- **[Pi](https://pi.dev)** - Pi Agent 平台
+See [Architecture Decisions](docs/DECISIONS.md) for explicit privacy, downloader, monitoring, and dedupe decisions.
 
----
+## Documentation
 
-## 架构决策
+- [Product Requirements](docs/PRD.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Architecture Decisions](docs/DECISIONS.md)
+- [BT Adapter Guide](docs/BT-ADAPTER-GUIDE.md)
+- [Environment Configuration](docs/ENVIRONMENT.md)
+- [Pi API Reference](docs/PI_API_REFERENCE.md)
+- [Pi Extensions Official Docs Copy](docs/PI_EXTENSIONS.md)
 
-关键决策：
-
-- **D030**: TypeScript 扩展优于 Python 后端
-- **D032**: 可插拔 BT 站点适配器
-- **D033**: Pi session 状态优于 SQLite
-- **D036**: 丰富元数据卡片（海报 + 翻译 + 磁力链）
-- **D037**: 独立下载器配置（qBittorrent 或 Transmission）
-- **D038**: 分离 GitHub 仓库
-
----
-
-## 贡献
-
-欢迎贡献新的 BT 站点适配器！
-
-**贡献流程**：
-1. Fork 仓库
-2. 创建功能分支（`git checkout -b add-mysite-adapter`）
-3. 实现适配器（参考 [BT-ADAPTER-GUIDE.md](docs/BT-ADAPTER-GUIDE.md)）
-4. 编写测试
-5. 提交 PR
-
-**社区需求**（欢迎贡献）：
-- [ ] JavLibrary 适配器
-- [ ] Nyaa.si 适配器
-- [ ] 141JAV 适配器
-- [ ] DMM 适配器
-
----
-
-## 许可证
+## License
 
 MIT License
-
----
-
-## 联系
-
-- **Issues**: [GitHub Issues](https://github.com/milikii/mediapi-adult/issues)
-- **讨论**: [GitHub Discussions](https://github.com/milikii/mediapi-adult/discussions)
-
----
-
-## 隐私声明
-
-**MediaPi Adult 扩展尊重用户隐私**：
-
-- ✅ 所有路径信息强制脱敏（不记录真实路径）
-- ✅ 本地运行（无数据上传到第三方）
-- ✅ Session 状态加密存储
-- ✅ 磁力链加密传输
-- ✅ 用户完全控制数据
-
-**不收集**：
-- ❌ 搜索历史
-- ❌ 下载记录
-- ❌ 文件路径
-- ❌ 个人信息
-
----
-
-**注意**：此扩展需要 Pi 运行环境。如果需要 PT 观影链支持，请访问 [mediapi-viewing](https://github.com/milikii/mediapi-viewing) 独立仓库。
