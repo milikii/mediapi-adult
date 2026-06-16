@@ -28,7 +28,7 @@ This document records active architecture and product decisions for MediaPi Adul
 
 **Status**: ACTIVE
 
-**Decision**: Adult resource discovery uses public BT site adapters. It must not use Prowlarr or PT indexers.
+**Decision**: Adult resource discovery uses public BT site adapters for downloadable resources. It must not use Prowlarr or PT indexers.
 
 **Design**:
 
@@ -36,6 +36,7 @@ This document records active architecture and product decisions for MediaPi Adul
 - Adapter registry for multi-site management.
 - One TypeScript file per site, such as `sukebei.ts`.
 - Progressive expansion: Sukebei first, then additional public BT sites.
+- BT resource adapters return normalized public resource results and must not add downloads, write task state, decide dedupe, or perform import/cleanup.
 
 **Reason**:
 
@@ -60,11 +61,36 @@ This document records active architecture and product decisions for MediaPi Adul
 - Background monitoring needs a durable active-task registry independent of one chat turn.
 - A database server is unnecessary for MVP; JSONL or equivalent local files are enough.
 
-**Replaces**:
-
-- Old assumption that Pi session state alone could cover download monitor and history.
-
 **Applies to**: Persistence, dedupe, monitor recovery
+
+---
+
+### D035: Separate Source Adapter Families
+
+**Status**: ACTIVE
+
+**Decision**: Treat downloadable BT resource sources and metadata sources as separate adapter families, even when one external website can provide both.
+
+**Families**:
+
+- `bt_resource`: public adult BT search sources that return magnets or public resource details.
+- `metadata`: JAV/adult metadata sources that return work metadata, artwork, and category hints.
+
+**Rules**:
+
+- `ADULT_ENABLED_SITES` selects only `bt_resource` adapters.
+- Metadata sources must use a separate registry and configuration key when enabled.
+- Every new source must document a source profile: stable name, family, base URL env, capabilities, adult boundary, rate-limit policy, failure mode, and fixture coverage.
+- BT adapters must not mutate downloader state, local task state, completed history, import targets, or Pi session entries.
+- Metadata adapters must not return magnets as primary search results or decide final dedupe/import outcomes.
+
+**Reason**:
+
+- Prevents future source additions from mixing search, metadata enrichment, and workflow side effects.
+- Keeps partial failures isolated by source family.
+- Makes adapter contribution and review predictable before implementation expands beyond Sukebei/JavBus.
+
+**Applies to**: Source adapter design, configuration, search registry
 
 ---
 
@@ -106,7 +132,7 @@ ADULT_TR_PASSWORD=***
 
 **Reason**:
 
-- Adult public-BT resources and PT viewing resources have different connection, retention, and cleanup settings.
+- Adult public-BT resources and PT viewing resources have different connection, import, and cleanup settings.
 - Adult tasks should be isolated operationally from PT/viewing tasks.
 - Avoids any runtime dependency on `mediapi-viewing` downloader clients or state.
 
@@ -215,7 +241,6 @@ ADULT_TR_PASSWORD=***
 
 **Implication**:
 
-- `ADULT_RETENTION_DAYS` is not a core requirement for the new model.
 - Manual cleanup remains a recovery tool, not the normal path.
 - Cleanup must never delete imported library files.
 
@@ -309,6 +334,7 @@ ADULT_TR_PASSWORD=***
 | D030 | TypeScript extensions | Architecture |
 | D032 | Public BT site adapters only | Search |
 | D033 | Split Pi session and local state | Persistence |
+| D035 | Separate source adapter families | Source adapters |
 | D036 | Rich metadata cards | Search UX |
 | D037 | Dedicated adult downloader instance | Downloading |
 | D038 | Separate repositories | Project structure |

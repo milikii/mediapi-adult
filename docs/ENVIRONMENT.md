@@ -2,9 +2,9 @@
 
 ## Overview
 
-MediaPi Adult reads configuration from environment variables. `.env.example` documents supported values, but runtime loading depends on how Pi starts the extension. If Pi does not load `.env` automatically, start Pi from a shell where these variables are exported.
+MediaPi Adult reads configuration from environment variables. `.env.example` documents the supported values, but runtime loading depends on how Pi starts the extension. If Pi does not load `.env` automatically, start Pi from a shell where these variables are exported.
 
-The adult downloader should be a dedicated qBittorrent or Transmission instance. Do not point these variables at the PT/viewing downloader instance.
+The adult downloader must be a dedicated qBittorrent or Transmission instance. Do not point these variables at the PT/viewing downloader instance.
 
 ## Required Variables
 
@@ -15,13 +15,13 @@ The adult downloader should be a dedicated qBittorrent or Transmission instance.
 | `ADULT_IMPORT_TARGET_CENSORED` | Yes | none | Root directory for coded censored JAV imports. |
 | `ADULT_IMPORT_TARGET_UNCENSORED` | Yes | none | Root directory for coded uncensored JAV imports. |
 | `ADULT_IMPORT_TARGET_NO_CODE` | Yes | none | Root directory for no-code or uncertain-category adult imports. |
-| `ADULT_ENABLED_SITES` | No | `sukebei` | Comma-separated public BT site adapter names. MVP default is `sukebei`. |
+| `ADULT_ENABLED_SITES` | No | `sukebei` | Comma-separated public BT resource source names. |
 
-`ADULT_IMPORT_ROOT` is legacy. New code should prefer category aliases. If retained for compatibility, it must not replace the three required category target variables.
+`ADULT_IMPORT_ROOT` and `ADULT_RETENTION_DAYS` are not supported by the new workflow.
 
 ## qBittorrent Variables
 
-Required when `ADULT_DOWNLOADER_TYPE=qbittorrent`:
+Required when `ADULT_DOWNLOADER_TYPE=qbittorrent` and downloader calls are implemented:
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ Required when `ADULT_DOWNLOADER_TYPE=qbittorrent`:
 
 ## Transmission Variables
 
-Required when `ADULT_DOWNLOADER_TYPE=transmission`:
+Required when `ADULT_DOWNLOADER_TYPE=transmission` and downloader calls are implemented:
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -47,7 +47,9 @@ Required when `ADULT_DOWNLOADER_TYPE=transmission`:
 | `JAVBUS_BASE_URL` | `https://www.javbus.com` | JavBus metadata base URL. |
 | `JAVLIBRARY_BASE_URL` | `https://www.javlibrary.com` | Planned metadata fallback. |
 
-Only public BT site adapters belong in `ADULT_ENABLED_SITES`. Do not configure Prowlarr or PT indexers for this extension.
+Only public BT resource source adapters belong in `ADULT_ENABLED_SITES`. Do not configure metadata-only sources, Prowlarr, Jackett, or PT indexers for this extension.
+
+When metadata source selection is implemented, it must use a separate variable such as `ADULT_ENABLED_METADATA_SOURCES`. A website that supports both metadata and magnets should still expose those capabilities through separate adapter families.
 
 ## Background Monitor
 
@@ -73,7 +75,7 @@ Directory layout:
 - Coded tasks: `<target-root>/<NORMALIZED-CODE>/<original filename>`.
 - No-code tasks: `<no-code-root>/<sanitized-display-title>-<short-infohash>/<original filename>`.
 
-The extension should store only aliases and redacted paths in user-facing output, Pi session entries, and local state.
+The extension stores only aliases and redacted paths in user-facing output, Pi session entries, and local state.
 
 ## Local State
 
@@ -83,12 +85,6 @@ Recommended files under `ADULT_STATE_DIR`:
 - `completed.jsonl`: long-lived completed history for dedupe.
 
 State files may store codes, infohashes, display titles, target aliases, status, timestamps, import IDs, and non-sensitive error summaries. They must not store real source paths, real target paths, or downloader credentials.
-
-## Retention
-
-The current product model does not keep adult BT tasks seeding after import. Cleanup should run after successful import and completed-history write.
-
-`ADULT_RETENTION_DAYS` is legacy and should not be used as a default blocker for cleanup in the new workflow.
 
 ## Translation
 
@@ -100,10 +96,11 @@ Translation must degrade gracefully. Search should still work when no translatio
 
 ## Validation Rules
 
-- Fail fast when the selected downloader is missing required connection values.
 - Reject unknown `ADULT_DOWNLOADER_TYPE` values.
-- Require all three category target aliases for automatic import.
-- Validate `ADULT_STATE_DIR` is configured and writable before starting the monitor.
+- Require `ADULT_STATE_DIR`.
+- Require all three category target aliases.
+- Require monitor interval to be at least one second.
 - Validate target paths after resolution and ensure imports stay inside the selected alias root.
-- Ignore or reject unknown site names with an actionable error; choose one policy and document it in implementation.
-- Never include password values, local paths, or raw environment values in thrown errors, tool details, Pi session entries, or long-lived state.
+- Reject unknown `ADULT_ENABLED_SITES` names with an actionable error when the BT source registry is created.
+- Keep metadata source configuration separate from `ADULT_ENABLED_SITES`.
+- Never include password values, local paths, or raw environment values in thrown errors, tool details, Pi session entries, or local state.
