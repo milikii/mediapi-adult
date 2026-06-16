@@ -33,6 +33,8 @@ No adapter, downloader, importer, completed-history, or task-registry implementa
 
 ## Target Runtime Boundaries
 
+The modules listed below are the planned target layout, not current code. Only `src/index.ts`, `src/tools/index.ts`, and `src/services/monitor.ts` exist today (see Current Baseline above); the others are not implemented yet.
+
 - `src/index.ts` registers tools and lifecycle handlers.
 - `src/tools/*` owns Pi tool definitions and user-facing formatting.
 - `src/adapters/*` coordinates source registries without site-specific parsing.
